@@ -38,7 +38,12 @@ _logger = logging.getLogger(__name__)
 # Python scripts/interactive interpreter, e.g. via
 # `from toutiao_uploader.skeleton import fib`,
 # when using this Python module as a library.
+# src/toutiao_uploader/skeleton.py
+from .uploader import ToutiaoUploader
 
+def login_command():
+    uploader = ToutiaoUploader()
+    uploader.login()  # 调用 login 方法
 
 def fib(n):
     """Fibonacci example function
