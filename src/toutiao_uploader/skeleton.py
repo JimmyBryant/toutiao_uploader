@@ -41,10 +41,6 @@ _logger = logging.getLogger(__name__)
 # src/toutiao_uploader/skeleton.py
 from .uploader import ToutiaoUploader
 
-def login_command():
-    uploader = ToutiaoUploader()
-    uploader.login()  # 调用 login 方法
-
 def fib(n):
     """Fibonacci example function
 
@@ -115,21 +111,29 @@ def setup_logging(loglevel):
     )
 
 
-def main(args):
-    """Wrapper allowing :func:`fib` to be called with string arguments in a CLI fashion
+def login():
+    uploader = ToutiaoUploader()
+    uploader.login()
 
-    Instead of returning the value from :func:`fib`, it prints the result to the
-    ``stdout`` in a nicely formatted message.
+def publish_wtt_main(content):
+    uploader = ToutiaoUploader()
+    uploader.publishWTT(content)
 
-    Args:
-      args (List[str]): command line parameters as list of strings
-          (for example  ``["--verbose", "42"]``).
-    """
-    args = parse_args(args)
-    setup_logging(args.loglevel)
-    _logger.debug("Starting crazy calculations...")
-    print(f"The {args.n}-th Fibonacci number is {fib(args.n)}")
-    _logger.info("Script ends here")
+def main():
+    parser = argparse.ArgumentParser(description="Toutiao 上传工具")
+    subparsers = parser.add_subparsers(dest="command")
+
+    subparsers.add_parser("login", help="用户登录")
+
+    publish_parser = subparsers.add_parser("publish_wtt", help="发布微头条")
+    publish_parser.add_argument("content", type=str, help="微头条内容")
+
+    args = parser.parse_args()
+
+    if args.command == "login":
+        login()
+    elif args.command == "publish_wtt":
+        publish_wtt_main(args.content)
 
 
 def run():
