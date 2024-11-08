@@ -111,27 +111,45 @@ def setup_logging(loglevel):
     )
 
 
-def login():
+def login(username):
     uploader = ToutiaoUploader()
-    uploader.login()
-
+    uploader.login(username)
+def get_user_info(username):
+    uploader = ToutiaoUploader()
+    uploader.get_user_info(username)
 def publish_wtt_main(content):
     uploader = ToutiaoUploader()
     uploader.publishWTT(content)
 
+def publish_video(username,video_path):
+    uploader = ToutiaoUploader()
+    uploader.get_upload_space_url(username, video_path)
 def main():
     parser = argparse.ArgumentParser(description="Toutiao 上传工具")
     subparsers = parser.add_subparsers(dest="command")
 
-    subparsers.add_parser("login", help="用户登录")
+    # login 子命令
+    login_parser = subparsers.add_parser("login", help="登录今日头条账号")
+    login_parser.add_argument("--user", required=True, help="指定用户名")
 
     publish_parser = subparsers.add_parser("publish_wtt", help="发布微头条")
     publish_parser.add_argument("content", type=str, help="微头条内容")
 
+    get_user_info_parser = subparsers.add_parser("get_user_info", help="获取用户信息")
+    get_user_info_parser.add_argument("--user", type=str, help="用户名")
+
+    publish_video_parser = subparsers.add_parser("publish_video", help="发布视频")
+    publish_video_parser.add_argument("--user", type=str, help="指定用户名称")
+    publish_video_parser.add_argument("--video", type=str, help="视频文件路径")
+
     args = parser.parse_args()
 
     if args.command == "login":
-        login()
+        login(args.user)
+    elif args.command == "get_user_info":
+        get_user_info(args.user)
+    elif args.command == "publish_video":
+        publish_video(args.user, args.video)
     elif args.command == "publish_wtt":
         publish_wtt_main(args.content)
 

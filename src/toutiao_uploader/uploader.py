@@ -3,31 +3,197 @@ import requests
 import base64
 import qrcode
 import io
-import qrcode_terminal
 from PIL import Image
 import time
 import os
-from pyfiglet import figlet_format
+import json
+import random
+import string
+from datetime import datetime
+import hmac
+import hashlib
 
 class ToutiaoUploader:
     def __init__(self):
+        self.username = None
         self.token = None
         self.qrcode_url = None
+        self.base_url = "https://mp.toutiao.com/mp/agw/creator_center/user_info?app_id=1231"
+        self.upload_init_url = "https://tos-d-x-hl.snssdk.com/upload/v1/tos-cn-v-0004/oQbADZFKmIDf5zAAVuTgfjEEnVJMRLtADCvtqB?uploadmode=part&phase=init"
+        self.upload_url_template = "https://tos-d-x-hl.snssdk.com/upload/v1/tos-cn-v-0004/oQbADZFKmIDf5zAAVuTgfjEEnVJMRLtADCvtqB?uploadid={upload_id}&part_number={part_number}&phase=transfer&part_offset={part_offset}"
+        self.publish_url = "https://mp.toutiao.com/xigua/api/upload/PublishVideo"
         # 初始化
         pass
     
-    def login(self):
-        print("欢迎使用今日头条视频上传工具！")
-        print("请选择登录方式：")
-        print("1. 手机号登录")
-        print("2. 二维码登录")
-        choice = input("请输入您的选择：")
-        if choice == "1":
-            self.login_with_phone()
-        elif choice == "2":
-            self.login_with_qrcode()
-        else:
-            print("无效的选择，请重新选择。")
+    def login(self, username):
+        print("欢迎使用今日头条视频上传工具！请扫码登录")   
+        self.username = username     
+        # 用户扫码
+        self.login_with_qrcode()
+    def get_user_info(self, username):
+            # 从 cookies 文件加载
+            cookie_file = os.path.join(os.getcwd(), 'cookies', f"{username}.txt")
+            cookies = {}
+            if os.path.exists(cookie_file):
+                with open(cookie_file, 'r') as file:
+                    cookies = {line.split('=')[0]: line.split('=')[1].strip() for line in file}
+            headers = {
+                "Cookie": "; ".join([f"{k}={v}" for k, v in cookies.items()])
+            }
+            # 创建 user 目录
+            user_dir = os.path.join(os.getcwd(), 'user')
+            os.makedirs(user_dir, exist_ok=True)
+
+            # 获取用户信息
+            response = requests.get(self.base_url, headers=headers)
+            if response.status_code == 200:
+                user_info = response.json()
+                if user_info["code"] == 0:
+                    name = user_info.get("name", "unknown_user")
+                    file_path = os.path.join(user_dir, f"{name}.txt")
+                    
+                    # 保存用户信息到文件
+                    with open(file_path, 'w') as file:
+                        json.dump(user_info, file, ensure_ascii=False, indent=4)
+                    print(f"用户信息已保存到 {file_path}")
+                else:
+                    print("获取用户信息失败:", user_info.get("message", "未知错误"))
+            else:
+                print("请求失败，状态码:", response.status_code)
+
+    """
+        获取用户auth key
+    """
+    def get_auth_key(self,username):
+        url = "https://mp.toutiao.com/xigua/api/upload/getAuthKey/"
+        params = {
+            "params": '{"type":"video","column":"false","ugc":"false","useImageX":"true","useStsToken":"true"}'
+        }
+        cookies = self.load_cookies_by_username(username)
+        # Set headers, including cookies if required for auth
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+            "referer": "https://mp.toutiao.com/profile_v4/xigua/upload-video",
+            "Cookie": "; ".join([f"{k}={v}" for k, v in cookies.items()])  # Ensure cookies are set properly
+        }
+
+        try:
+            response = requests.get(url,params=params, headers=headers)
+            response.raise_for_status()  # Raises an error if status is not 200
+            auth_key_data = response.json()
+            print(auth_key_data)  # Display the API response data
+            return auth_key_data
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching AuthKey: {e}")
+
+    def get_signature_key(self, secret_key, date, region, service_name):
+        """
+        根据 AWS 签名版本 4 计算签名密钥
+        :param secret_key: AWS Secret Access Key
+        :param date: 当前日期（格式：yyyyMMdd）
+        :param region: 区域（例如：cn-north-1）
+        :param service_name: 服务名（例如：vod）
+        :return: 签名密钥
+        """
+        key = f"AWS4{secret_key}".encode("utf-8")
+        date_key = hmac.new(key, date.encode("utf-8"), hashlib.sha256).digest()
+        region_key = hmac.new(date_key, region.encode("utf-8"), hashlib.sha256).digest()
+        service_key = hmac.new(region_key, service_name.encode("utf-8"), hashlib.sha256).digest()
+        signing_key = hmac.new(service_key, b"aws4_request", hashlib.sha256).digest()
+        return signing_key
+
+    """
+        获取上传空间地址
+    """
+    def get_upload_space_url(self, username, video_path):
+        # API 信息
+        url = "https://vod.bytedanceapi.com"
+        path = "/"
+        service_name = "vod"
+        region = "cn-north-1"
+        action = "ApplyUploadInner"
+        version = "2020-11-19"
+        space_name = "pgc"
+        file_type = "video"
+        
+        # 计算视频文件的大小
+        video_size = os.path.getsize(video_path)
+
+        # 调用get_auth_key函数获取auth_data
+        auth_data = self.get_auth_key(username)
+
+        # 从返回的数据中提取AccessKeyId和SecretAccessKey
+        access_key = auth_data['data']['uploadToken']['AccessKeyId']
+        secret_key = auth_data['data']['uploadToken']['SecretAccessKey']
+        session_token = auth_data['data']['uploadToken']['SessionToken']
+
+
+        # 打印出获取的access_key和secret_key，检查是否正确
+        print("AccessKeyId:", access_key)
+        print("SecretAccessKey:", secret_key)
+
+        # 当前时间信息
+        timestamp = datetime.utcnow()
+        date = timestamp.strftime('%Y%m%d')
+        amz_date = timestamp.strftime('%Y%m%dT%H%M%SZ')
+
+        # 准备查询参数和 Headers
+        params = {
+            "Action": action,
+            "Version": version,
+            "SpaceName": space_name,
+            "FileType": file_type,
+            "IsInner": "1",
+            "FileSize": str(video_size),
+            "EnOID": "1",
+            "app_id": "1231",
+            "user_id": self.get_user_id(username),
+            "s": ''.join(random.choices(string.ascii_letters + string.digits, k=8)),
+        }
+
+        headers = {
+            "x-amz-date": amz_date,
+            'x-amz-security-token': session_token,
+            "x-amz-content-sha256": hashlib.sha256(b"").hexdigest()
+        }
+
+        # 创建 Credential String
+        credential_scope = f"{date}/{region}/{service_name}/aws4_request"
+        canonical_headers = "\n".join([f"{k}:{v}" for k, v in headers.items()]) + "\n"
+        signed_headers = ";".join(headers.keys())
+
+        # 构建 Canonical Request
+        canonical_querystring = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+        canonical_request = f"GET\n{path}\n{canonical_querystring}\n{canonical_headers}\n{signed_headers}\n{headers['x-amz-content-sha256']}"
+
+        # 创建 String to Sign
+        string_to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{hashlib.sha256(canonical_request.encode()).hexdigest()}"
+
+        # 生成签名密钥
+        signing_key = self.get_signature_key(secret_key, date, region, service_name)
+
+        # 计算 Signature
+        signature = hmac.new(signing_key, string_to_sign.encode(), hashlib.sha256).hexdigest()
+
+        # 创建 Authorization Header
+        authorization_header = (
+            f"AWS4-HMAC-SHA256 Credential={access_key}/{credential_scope}, "
+            f"SignedHeaders={signed_headers}, Signature={signature}"
+        )
+        headers["Authorization"] = authorization_header
+
+        # 发起请求
+        response = requests.get(url, params=params, headers=headers)
+        response_data = response.json()
+        print(response_data)
+        return response_data
+
+    def get_user_id(self, username):
+        # This function reads the user file and extracts the `user_id`
+        file_path = os.path.join("user", f"{username}.txt")
+        with open(file_path, 'r') as file:
+            user_data = json.load(file)
+        return user_data.get("user_id")
 
     def resize_qr_image(self, qr_input, size=(50, 50)):
         # 如果是URL，则生成二维码
@@ -94,18 +260,7 @@ class ToutiaoUploader:
         else:
             print(f"请求失败，状态码：{response.status_code}")
 
-    def login_with_phone(self):
-        phone_number = input("请输入您的手机号: ")
-        # 假设在此处发送验证码并验证
-        verification_code = input(f"已发送验证码到 {phone_number}，请输入验证码：")
-        # 在此添加实际的验证逻辑
-        if verification_code == "1234":  # 示例验证
-            print("登录成功！")
-            self.is_logged_in = True
-            self.save_cookies()
-        else:
-            print("验证码错误，请重试。")
-
+    # 使用二维码登录
     def login_with_qrcode(self):
         self.get_qr_code()
         self.wait_for_login()
@@ -132,7 +287,8 @@ class ToutiaoUploader:
                 redirect_url = data.get("redirect_url")
                 print(redirect_url)
                 if redirect_url:
-                    self.save_cookies_from_redirect(redirect_url,'user_cookies')
+                    self.save_cookies_to_file(redirect_url) # 保存cookies到文件
+                    self.get_user_info(self.username)   # 获取用户信息
                     return True
                 else:
                     print("未找到redirect_url。")                    
@@ -141,13 +297,13 @@ class ToutiaoUploader:
                 print(self.token)
         return False
 
-    def save_cookies_from_redirect(self, url, file_name):
+    def save_cookies_to_file(self, url):
         # 创建 cookies 文件夹路径
         folder_path = os.path.join(os.getcwd(), 'cookies')
         os.makedirs(folder_path, exist_ok=True)  # 如果不存在，则创建文件夹
 
         # 文件完整路径
-        file_path = os.path.join(folder_path, f"{file_name}.txt")
+        file_path = os.path.join(folder_path, f"{self.username}.txt")
 
         # 请求并保存 Cookies
         session = requests.Session()
@@ -159,7 +315,20 @@ class ToutiaoUploader:
             print(f"Cookies 已保存到 {file_path}")
         else:
             print("跳转失败，无法保存 Cookie")
-
+   
+   
+    """
+    从本地文件加载用户名对应的 Cookie
+    """
+    def load_cookies_by_username(self, username):
+        cookie_file = os.path.join(os.getcwd(), 'cookies', f"{username}.txt")
+        cookies = {}
+        if os.path.exists(cookie_file):
+            with open(cookie_file, 'r') as file:
+                for line in file:
+                    name, value = line.strip().split('=')
+                    cookies[name] =value
+        return cookies
     def load_cookies(self, file_path):
         cookies = {}
         with open(file_path, 'r') as file:
@@ -191,7 +360,19 @@ class ToutiaoUploader:
             print("微头条发布成功:", response.json())
         else:
             print("微头条发布失败，状态码:", response.status_code)
-    def upload_video(self, file_path):
-        # 处理视频上传逻辑
-        print(f"正在上传视频文件 {file_path}...")
-        # 在此添加上传 API 请求的逻辑
+    def _initiate_upload(self):
+        headers = {
+            "Content-Type": "application/json",
+        }
+        response = requests.post(self.upload_init_url, headers=headers)
+        response.raise_for_status()
+        return response.json()["data"]["uploadid"]
+
+    def _upload_chunk(self, upload_id, part_number, part_offset, chunk):
+        upload_url = self.upload_url_template.format(upload_id=upload_id, part_number=part_number, part_offset=part_offset)
+        response = requests.post(upload_url, headers=self.headers, data=chunk)
+        response.raise_for_status()
+
+    def publish_video(self, video_path, title=""):
+        upload_id = self._initiate_upload()
+        print("upload_id: %s" % upload_id)
