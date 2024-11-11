@@ -12,6 +12,7 @@ import string
 from datetime import datetime
 import hmac
 import hashlib
+import binascii
 
 class ToutiaoUploader:
     def __init__(self):
@@ -373,6 +374,69 @@ class ToutiaoUploader:
         response = requests.post(upload_url, headers=self.headers, data=chunk)
         response.raise_for_status()
 
-    def publish_video(self, video_path, title=""):
-        upload_id = self._initiate_upload()
-        print("upload_id: %s" % upload_id)
+    """
+        分块上传视频
+    """
+    def upload_video_in_parts(self, username, video_path):
+        # 获取上传地址信息
+        upload_space_info = self.get_upload_space_url(username, video_path)
+        upload_node = upload_space_info['Result']['InnerUploadAddress']['UploadNodes'][0]
+        upload_host = upload_node['UploadHost']
+        store_info = upload_node['StoreInfos'][0]
+        store_uri = store_info['StoreUri']
+        auth = store_info['Auth']
+
+        # 初始化请求
+        init_url = f"https://{upload_host}/upload/v1/{store_uri}?uploadmode=part&phase=init"
+        boundary = "----WebKitFormBoundaryu04Gvna450BA9yOU"
+        headers = {
+            "Authorization": auth,
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "cross-site",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+            "X-Storage-U": str(self.get_user_id(username)),
+            "referer": "https://mp.toutiao.com/",
+        }
+        init_response = requests.post(init_url, headers={**headers, "Content-Type": f"multipart/form-data; boundary={boundary}","X-Storage-Mode": "gateway"}, data=f"--{boundary}--\r\n")
+        init_response_data = init_response.json()
+        upload_id = init_response_data['data']['uploadid']
+
+        # 获取文件的总块数
+        total_size = os.path.getsize(video_path)
+        chunk_size = 10 * 1024 * 1024  # 每块大小设置为10MB
+        total_parts = (total_size // chunk_size) + (1 if total_size % chunk_size != 0 else 0)
+
+        with open(video_path, 'rb') as f:
+            for part_number in range(1, total_parts + 1):
+                data = f.read(chunk_size)
+                if not data:
+                    break
+
+                # 每个块的上传URL
+                part_url = (
+                    f"https://{upload_host}/upload/v1/{store_uri}"
+                    f"?uploadid={upload_id}&part_number={part_number}&phase=transfer"
+                    f"&part_offset={chunk_size * (part_number - 1)}"
+                )
+                
+                # 计算 Content-CRC32 值
+                crc32_value = binascii.crc32(data) & 0xffffffff
+                content_crc32 = format(crc32_value, '08x')
+
+                # 上传块请求
+                response = requests.post(part_url, headers={**headers, "Content-Type": "application/octet-stream", "Content-CRC32": content_crc32, "Content-Disposition": "attachment; filename=\"undefined\""}, data=data)
+                if response.status_code != 200:
+                    raise Exception(f"Failed to upload part {part_number}")
+
+                # 打印进度
+                response_data = response.json()
+                etag = response_data['data']['etag']
+                print(f"Uploaded part {part_number}/{total_parts}, ETag: {etag}")
+
+        # 完成上传请求
+        finish_url = f"https://{upload_host}/upload/v1/{store_uri}?uploadmode=part&phase=finish&uploadid={upload_id}"
+        finish_response = requests.post(finish_url, headers=headers)
+        if finish_response.status_code != 200:
+            raise Exception("Failed to complete upload.")
+
+        print("Upload completed successfully.")

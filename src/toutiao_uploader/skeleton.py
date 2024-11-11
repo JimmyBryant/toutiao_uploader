@@ -123,7 +123,7 @@ def publish_wtt_main(content):
 
 def publish_video(username,video_path):
     uploader = ToutiaoUploader()
-    uploader.get_upload_space_url(username, video_path)
+    uploader.upload_video_in_parts(username, video_path)
 def main():
     parser = argparse.ArgumentParser(description="Toutiao 上传工具")
     subparsers = parser.add_subparsers(dest="command")
