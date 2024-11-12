@@ -63,29 +63,74 @@ class ToutiaoUploader:
                 print("请求失败，状态码:", response.status_code)
 
     """
-        获取用户auth key
+        获取AuthKey
     """
-    def get_auth_key(self,username):
+    def get_auth_key(self, username):
+        """
+        获取用户 auth key，优先检查缓存数据，判断是否过期。
+        
+        参数:
+        - username: 用户名，用于加载 cookies 和缓存文件命名。
+
+        返回:
+        - auth_key_data: 包含 auth key 的 JSON 数据。
+        """
+        # 缓存文件路径
+        cache_dir = "cache"
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_file_path = os.path.join(cache_dir, f"auth_{username}.json")
+
+        # 检查缓存文件是否存在
+        if os.path.exists(cache_file_path):
+            with open(cache_file_path, "r", encoding="utf-8") as cache_file:
+                cached_data = json.load(cache_file)
+            
+            # 检查是否包含有效的 uploadToken 和 ExpiredTime
+            upload_token = cached_data.get("data", {}).get("uploadToken", {})
+            expired_time_str = upload_token.get("ExpiredTime")
+            
+            if expired_time_str:
+                # 将 ISO8601 格式的时间转换为时间戳
+                expired_time = datetime.strptime(expired_time_str, "%Y-%m-%dT%H:%M:%S.%fZ")
+                expired_timestamp = expired_time.timestamp()
+                current_timestamp = datetime.now().timestamp()
+                
+                # 如果未过期，直接返回缓存数据
+                if current_timestamp < expired_timestamp:
+                    print("Using cached auth key.")
+                    return cached_data
+
+        # 如果缓存不存在或已过期，重新请求 API
         url = "https://mp.toutiao.com/xigua/api/upload/getAuthKey/"
         params = {
             "params": '{"type":"video","column":"false","ugc":"false","useImageX":"true","useStsToken":"true"}'
         }
         cookies = self.load_cookies_by_username(username)
-        # Set headers, including cookies if required for auth
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
             "referer": "https://mp.toutiao.com/profile_v4/xigua/upload-video",
-            "Cookie": "; ".join([f"{k}={v}" for k, v in cookies.items()])  # Ensure cookies are set properly
+            "Cookie": "; ".join([f"{k}={v}" for k, v in cookies.items()])
         }
 
         try:
-            response = requests.get(url,params=params, headers=headers)
-            response.raise_for_status()  # Raises an error if status is not 200
+            response = requests.get(url, params=params, headers=headers)
+            response.raise_for_status()
             auth_key_data = response.json()
-            print(auth_key_data)  # Display the API response data
+
+            # 更新缓存文件
+            with open(cache_file_path, "w", encoding="utf-8") as cache_file:
+                json.dump(auth_key_data, cache_file, ensure_ascii=False, indent=4)
+            
+            print("Fetched new auth key and updated cache.")
             return auth_key_data
+
         except requests.exceptions.RequestException as e:
             print(f"Error fetching AuthKey: {e}")
+            # 如果请求失败且缓存存在，返回缓存数据
+            if os.path.exists(cache_file_path):
+                print("Returning cached data due to API failure.")
+                return cached_data
+            raise Exception("Failed to fetch AuthKey and no valid cache available.")
 
     def get_signature_key(self, secret_key, date, region, service_name):
         """
@@ -405,7 +450,7 @@ class ToutiaoUploader:
         total_size = os.path.getsize(video_path)
         chunk_size = 10 * 1024 * 1024  # 每块大小设置为10MB
         total_parts = (total_size // chunk_size) + (1 if total_size % chunk_size != 0 else 0)
-
+        uploaded_parts = []
         with open(video_path, 'rb') as f:
             for part_number in range(1, total_parts + 1):
                 data = f.read(chunk_size)
@@ -419,24 +464,71 @@ class ToutiaoUploader:
                     f"&part_offset={chunk_size * (part_number - 1)}"
                 )
                 
+                
                 # 计算 Content-CRC32 值
                 crc32_value = binascii.crc32(data) & 0xffffffff
                 content_crc32 = format(crc32_value, '08x')
+                # 上传块，带有错误处理
+                retries = 3  # 最大重试次数
+                for attempt in range(1, retries + 1):
+                    try:
+                        # 上传块请求
+                        response = requests.post(part_url, headers={**headers, "Content-Type": "application/octet-stream", "Content-CRC32": content_crc32, "Content-Disposition": "attachment; filename=\"undefined\""}, data=data)
+                        if response.status_code != 200:
+                            print(f"Error: Failed to upload part {part_number}. "f"Status Code: {response.status_code}, Response: {response.text}")
+                            raise Exception("Upload failed.")
 
-                # 上传块请求
-                response = requests.post(part_url, headers={**headers, "Content-Type": "application/octet-stream", "Content-CRC32": content_crc32, "Content-Disposition": "attachment; filename=\"undefined\""}, data=data)
-                if response.status_code != 200:
-                    raise Exception(f"Failed to upload part {part_number}")
-
-                # 打印进度
-                response_data = response.json()
-                etag = response_data['data']['etag']
-                print(f"Uploaded part {part_number}/{total_parts}, ETag: {etag}")
+                        # 保存每个块的 part_number 和 CRC32 值
+                        uploaded_parts.append(f"{part_number}:{content_crc32}")
+                        # 打印进度
+                        response_data = response.json()
+                        etag = response_data['data']['etag']
+                        # 打印进度
+                        progress = (part_number / total_parts) * 100
+                        print(f"Uploaded part {etag}, {part_number}/{total_parts}, Progress: {progress:.2f}%")
+                        break  # 成功上传，退出重试循环
+                    except Exception as e:
+                        print(f"Attempt {attempt}/{retries} failed for part {part_number}: {e}")
+                        if attempt == retries:
+                            raise Exception(f"Failed to upload part {part_number} after {retries} attempts.")
+                        time.sleep(2 ** attempt)  # 指数退避
 
         # 完成上传请求
         finish_url = f"https://{upload_host}/upload/v1/{store_uri}?uploadmode=part&phase=finish&uploadid={upload_id}"
-        finish_response = requests.post(finish_url, headers=headers)
+        finish_data = ",".join(uploaded_parts)
+        finish_response = requests.post(finish_url, headers={**headers,"Content-Type": "text/plain;charset=UTF-8"},data=finish_data)
         if finish_response.status_code != 200:
             raise Exception("Failed to complete upload.")
 
-        print("Upload completed successfully.")
+        print(f"Upload completed successfully.{finish_response.text}")
+
+    # 假设已有其他方法，以下是新方法
+    def get_video_info(self, username):
+        # 假设从已有方法中获取 session_key 和 uid
+        session_key = self.get_session_key(username)
+        uid = self.get_user_id(username)
+        
+        # 构建请求 URL 和 Headers
+        url = "https://example.com/get_video_info"  # 替换为实际的 API 地址
+        headers = {
+            "Authorization": self.generate_authorization_token(username),
+            "X-Amz-Content-Sha256": self.generate_content_sha256(),
+            "X-Amz-Date": self.generate_amz_date(),
+            "X-Amz-Security-Token": self.get_amz_security_token(username),
+            "Content-Type": "application/json",
+        }
+        
+        # 构造 POST 数据
+        post_data = {
+            "SessionKey": session_key,
+            "Functions": [{"name": "GetMeta"}],
+            "CallbackArgs": json.dumps({"uid": uid}),
+        }
+        
+        # 发送 POST 请求
+        response = requests.post(url, headers=headers, data=json.dumps(post_data))
+        if response.status_code != 200:
+            raise Exception(f"Failed to fetch video info: {response.text}")
+        
+        # 返回响应数据
+        return response.json()
