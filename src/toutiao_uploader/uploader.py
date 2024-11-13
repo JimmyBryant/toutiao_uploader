@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 import hmac
 import hashlib
 import binascii
-from .utils import generate_canonical_header,is_expired,get_video_dimensions, generate_authorization
+from .utils import is_expired,get_video_dimensions, generate_authorization
 
     
 class ToutiaoUploader:
@@ -272,7 +272,7 @@ class ToutiaoUploader:
         # 发起请求
         response = requests.get(url, params=params, headers=headers)
         response_data = response.json()
-        print(f"节点信息: {response_data}")
+        # print(f"节点信息: {response_data}")
         return response_data
 
     def get_user_id(self, username):
@@ -560,12 +560,12 @@ class ToutiaoUploader:
         """
         user_id = self.get_user_id(username)
         # 调用get_auth_key函数获取auth_data
-        auth_data = self.get_auth_key(username)
+        auth_data = self.get_auth_key(username,space_name)
 
         # 从返回的数据中提取AccessKeyId和SecretAccessKey
-        access_key = auth_data['data']['uploadToken']['AccessKeyId']
-        secret_key = auth_data['data']['uploadToken']['SecretAccessKey']
-        session_token = auth_data['data']['uploadToken']['SessionToken']
+        access_key = auth_data['access_key_id']
+        secret_key = auth_data['secret_access_key']
+        session_token = auth_data['session_token']
         url = (
             "https://vod.bytedanceapi.com/"
             f"?Action=CommitUploadInner&Version=2020-11-19&SpaceName={space_name}"
@@ -592,7 +592,14 @@ class ToutiaoUploader:
             f"{signed_headers}\n"  # SignedHeaders
             f"{payload_hash}"  # HashedPayload
         )
-        headers = generate_canonical_header(access_key,secret_key,session_token,payload_json)
+        authorization = generate_authorization(access_key, secret_key, canonical_request)
+        headers = {
+            "authorization": authorization,
+            "x-amz-content-sha256": payload_hash,
+            "x-amz-date": amz_date,
+            "x-amz-security-token": session_token,
+        }
+        # headers = generate_canonical_header(access_key,secret_key,session_token,payload_json)
 
         # 提交请求
         try:
@@ -603,7 +610,7 @@ class ToutiaoUploader:
             # 缓存数据到文件
             cache_dir = "cache"
             os.makedirs(cache_dir, exist_ok=True)  # 确保缓存目录存在
-            cache_path = os.path.join(cache_dir, f"commit_{user_id}.json")
+            cache_path = os.path.join(cache_dir, f"commit_{user_id}_{space_name}.json")
             with open(cache_path, "w", encoding="utf-8") as cache_file:
                 json.dump(response_data, cache_file, ensure_ascii=False, indent=4)
 

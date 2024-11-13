@@ -3,15 +3,6 @@ import hmac
 from datetime import datetime,timezone
 import cv2
 
-def generate_x_amz_content_sha256(payload: str) -> str:
-    """
-    生成 x-amz-content-sha256 的值
-    :param payload: 请求体内容
-    :return: 请求体的 SHA256 哈希值
-    """
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
 
 def generate_x_amz_date() -> str:
     """
@@ -58,38 +49,6 @@ def generate_authorization(ak: str, sk: str, canonical_request: str) -> str:
         f"SignedHeaders={signed_headers}, Signature={signature}"
     )
 
-
-def generate_canonical_header(ak, sk, session_token, payload):
-    """
-    生成包含所有 AWS 签名头的字典
-    :param ak: Access Key
-    :param sk: Secret Key
-    :param session_token: 会话令牌
-    :param payload: 请求体内容
-    :return: 包含 AWS 规范头的字典
-    """
-    payload_hash = generate_x_amz_content_sha256(payload)
-    amz_date = generate_x_amz_date()
-    signed_headers = "x-amz-content-sha256;x-amz-date;x-amz-security-token"
-    canonical_request = (
-        f"POST\n"  # HTTPMethod
-        f"/\n"  # CanonicalURI
-        f"Action=CommitUploadInner&SpaceName=short_video_toutiao&Version=2020-11-19&app_id=1231&user_id=6964786822\n"  # CanonicalQueryString
-        f"x-amz-content-sha256:{payload_hash}\n"  # CanonicalHeaders
-        f"x-amz-date:{amz_date}\n"
-        f"x-amz-security-token:{session_token}\n\n"
-        f"{signed_headers}\n"  # SignedHeaders
-        f"{payload_hash}"  # HashedPayload
-    )
-
-    authorization = generate_authorization(ak, sk, canonical_request)
-
-    return {
-        "authorization": authorization,
-        "x-amz-content-sha256": payload_hash,
-        "x-amz-date": amz_date,
-        "x-amz-security-token": session_token,
-    }
 
 def is_expired(timestamp):
     """
