@@ -9,11 +9,13 @@ import os
 import json
 import random
 import string
-from datetime import datetime
+from datetime import datetime, timezone
 import hmac
 import hashlib
 import binascii
+from .utils import generate_canonical_header,is_expired,get_video_dimensions, generate_authorization
 
+    
 class ToutiaoUploader:
     def __init__(self):
         self.username = None
@@ -62,49 +64,52 @@ class ToutiaoUploader:
             else:
                 print("请求失败，状态码:", response.status_code)
 
-    """
-        获取AuthKey
-    """
-    def get_auth_key(self, username):
+
+    def get_auth_key(self, username, space_name):
         """
         获取用户 auth key，优先检查缓存数据，判断是否过期。
         
         参数:
         - username: 用户名，用于加载 cookies 和缓存文件命名。
+        - space_name: 上传空间名称，决定使用的 API 地址。
 
         返回:
-        - auth_key_data: 包含 auth key 的 JSON 数据。
+        - dict: 包含统一格式化的 auth key 数据。
         """
         # 缓存文件路径
         cache_dir = "cache"
         os.makedirs(cache_dir, exist_ok=True)
-        cache_file_path = os.path.join(cache_dir, f"auth_{username}.json")
+        cache_file_path = os.path.join(cache_dir, f"auth_{username}_{space_name}.json")
 
         # 检查缓存文件是否存在
         if os.path.exists(cache_file_path):
             with open(cache_file_path, "r", encoding="utf-8") as cache_file:
                 cached_data = json.load(cache_file)
-            
-            # 检查是否包含有效的 uploadToken 和 ExpiredTime
-            upload_token = cached_data.get("data", {}).get("uploadToken", {})
-            expired_time_str = upload_token.get("ExpiredTime")
-            
-            if expired_time_str:
-                # 将 ISO8601 格式的时间转换为时间戳
-                expired_time = datetime.strptime(expired_time_str, "%Y-%m-%dT%H:%M:%S.%fZ")
-                expired_timestamp = expired_time.timestamp()
-                current_timestamp = datetime.now().timestamp()
-                
-                # 如果未过期，直接返回缓存数据
-                if current_timestamp < expired_timestamp:
-                    print("Using cached auth key.")
-                    return cached_data
+            expired_time = cached_data.get("expired_time_str")
+            if expired_time and not is_expired(expired_time):
+                print("Using cached auth key.")
+                return cached_data
+            else:
+                print("Auth key expired. Requesting new key.")
 
-        # 如果缓存不存在或已过期，重新请求 API
-        url = "https://mp.toutiao.com/xigua/api/upload/getAuthKey/"
-        params = {
-            "params": '{"type":"video","column":"false","ugc":"false","useImageX":"true","useStsToken":"true"}'
-        }
+        # 选择 API 地址
+        if space_name == "short_video_toutiao":
+            url = "https://mp.toutiao.com/toutiao/upload/auth_token/v1"
+            params = {
+                "aid": "1231",
+                "device_platform": "web",
+                "type": "video",
+                "upload_source": "10020004",
+            }
+        elif space_name == "pgc":
+            url = "https://mp.toutiao.com/xigua/api/upload/getAuthKey/"
+            params = {
+                "params": '{"type":"video","column":"false","ugc":"false","useImageX":"true","useStsToken":"true"}'
+            }
+        else:
+            raise ValueError(f"Unsupported space_name: {space_name}")
+
+        # 发起请求
         cookies = self.load_cookies_by_username(username)
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
@@ -115,23 +120,55 @@ class ToutiaoUploader:
         try:
             response = requests.get(url, params=params, headers=headers)
             response.raise_for_status()
-            auth_key_data = response.json()
+            raw_data = response.json()
+            formatted_data = self.format_auth_data(raw_data, space_name)
 
             # 更新缓存文件
             with open(cache_file_path, "w", encoding="utf-8") as cache_file:
-                json.dump(auth_key_data, cache_file, ensure_ascii=False, indent=4)
-            
+                json.dump(formatted_data, cache_file, ensure_ascii=False, indent=4)
+
             print("Fetched new auth key and updated cache.")
-            return auth_key_data
+            return formatted_data
 
         except requests.exceptions.RequestException as e:
             print(f"Error fetching AuthKey: {e}")
-            # 如果请求失败且缓存存在，返回缓存数据
             if os.path.exists(cache_file_path):
                 print("Returning cached data due to API failure.")
                 return cached_data
             raise Exception("Failed to fetch AuthKey and no valid cache available.")
 
+
+    def format_auth_data(self, raw_data, space_name):
+        """
+        格式化返回数据为统一的结构。
+
+        参数:
+        - raw_data: API 原始返回数据。
+        - space_name: 当前上传空间名称。
+
+        返回:
+        - dict: 格式化后的数据。
+        """
+        if space_name == "short_video_toutiao":
+            return {
+                "space_name": raw_data["space_name"],
+                "access_key": None,
+                "access_key_id": raw_data["access_key_id"],
+                "session_token": raw_data["session_token"],
+                "secret_access_key": raw_data["secret_access_key"],
+                "expired_time_str": raw_data["expire_time_str"]
+            }
+        elif space_name == "pgc":
+            upload_token = raw_data["data"]["uploadToken"]
+            return {
+                "space_name": raw_data["data"]["spaceName"],
+                "access_key": raw_data["data"]["accessKey"],
+                "access_key_id": upload_token["AccessKeyId"],
+                "session_token": upload_token["SessionToken"],
+                "secret_access_key": upload_token["SecretAccessKey"],
+                "expired_time_str": upload_token["ExpiredTime"]
+            }
+        raise ValueError(f"Unsupported space_name: {space_name}")
     def get_signature_key(self, secret_key, date, region, service_name):
         """
         根据 AWS 签名版本 4 计算签名密钥
@@ -159,27 +196,31 @@ class ToutiaoUploader:
         region = "cn-north-1"
         action = "ApplyUploadInner"
         version = "2020-11-19"
-        space_name = "pgc"
         file_type = "video"
         
+        # 根据视频尺寸动态设置 SpaceName
+        width, height = get_video_dimensions(video_path)
+        if width < height:
+            space_name = "short_video_toutiao"
+        else:
+            space_name = "pgc"
+
         # 计算视频文件的大小
         video_size = os.path.getsize(video_path)
 
-        # 调用get_auth_key函数获取auth_data
-        auth_data = self.get_auth_key(username)
+        # 调用 get_auth_key 函数获取 auth_data
+        auth_data = self.get_auth_key(username,space_name)
+        access_key_id = auth_data['access_key_id']
+        secret_access_key = auth_data['secret_access_key']
+        session_token = auth_data['session_token']
 
-        # 从返回的数据中提取AccessKeyId和SecretAccessKey
-        access_key = auth_data['data']['uploadToken']['AccessKeyId']
-        secret_key = auth_data['data']['uploadToken']['SecretAccessKey']
-        session_token = auth_data['data']['uploadToken']['SessionToken']
-
-
-        # 打印出获取的access_key和secret_key，检查是否正确
-        print("AccessKeyId:", access_key)
-        print("SecretAccessKey:", secret_key)
+        # 打印出获取的 AccessKeyId 和 SecretAccessKey，检查是否正确
+        print("AccessKeyId:", access_key_id)
+        print("SecretAccessKey:", secret_access_key)
+        print("SessionToken:", session_token)
 
         # 当前时间信息
-        timestamp = datetime.utcnow()
+        timestamp = datetime.now(timezone.utc)
         date = timestamp.strftime('%Y%m%d')
         amz_date = timestamp.strftime('%Y%m%dT%H%M%SZ')
 
@@ -216,22 +257,22 @@ class ToutiaoUploader:
         string_to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{hashlib.sha256(canonical_request.encode()).hexdigest()}"
 
         # 生成签名密钥
-        signing_key = self.get_signature_key(secret_key, date, region, service_name)
+        signing_key = self.get_signature_key(secret_access_key, date, region, service_name)
 
         # 计算 Signature
         signature = hmac.new(signing_key, string_to_sign.encode(), hashlib.sha256).hexdigest()
 
         # 创建 Authorization Header
         authorization_header = (
-            f"AWS4-HMAC-SHA256 Credential={access_key}/{credential_scope}, "
+            f"AWS4-HMAC-SHA256 Credential={access_key_id}/{credential_scope}, "
             f"SignedHeaders={signed_headers}, Signature={signature}"
         )
         headers["Authorization"] = authorization_header
-
+        headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.128 Safari/537.36"
         # 发起请求
         response = requests.get(url, params=params, headers=headers)
         response_data = response.json()
-        print(response_data)
+        print(f"节点信息: {response_data}")
         return response_data
 
     def get_user_id(self, username):
@@ -426,6 +467,7 @@ class ToutiaoUploader:
         # 获取上传地址信息
         upload_space_info = self.get_upload_space_url(username, video_path)
         upload_node = upload_space_info['Result']['InnerUploadAddress']['UploadNodes'][0]
+        session_key = upload_node['SessionKey']
         upload_host = upload_node['UploadHost']
         store_info = upload_node['StoreInfos'][0]
         store_uri = store_info['StoreUri']
@@ -501,34 +543,155 @@ class ToutiaoUploader:
             raise Exception("Failed to complete upload.")
 
         print(f"Upload completed successfully.{finish_response.text}")
+        width, height = get_video_dimensions(video_path)
+        space_name = 'short_video_toutiao' if width < height else "pgc"  # width小于height就是竖屏
+        self.commit_video(username,session_key,space_name)
 
-    # 假设已有其他方法，以下是新方法
-    def get_video_info(self, username):
-        # 假设从已有方法中获取 session_key 和 uid
-        session_key = self.get_session_key(username)
-        uid = self.get_user_id(username)
-        
-        # 构建请求 URL 和 Headers
-        url = "https://example.com/get_video_info"  # 替换为实际的 API 地址
-        headers = {
-            "Authorization": self.generate_authorization_token(username),
-            "X-Amz-Content-Sha256": self.generate_content_sha256(),
-            "X-Amz-Date": self.generate_amz_date(),
-            "X-Amz-Security-Token": self.get_amz_security_token(username),
-            "Content-Type": "application/json",
-        }
-        
-        # 构造 POST 数据
-        post_data = {
+    def commit_video(self, username, session_key, space_name="pgc"):
+        """
+        提交视频到字节跳动的 VOD 服务并缓存结果。
+
+        参数:
+        - username: 用户名称
+        - session_key: 用户的 session_key
+        - space_name: 空间名称
+        返回:
+        - 提交结果的响应 JSON 数据
+        """
+        user_id = self.get_user_id(username)
+        # 调用get_auth_key函数获取auth_data
+        auth_data = self.get_auth_key(username)
+
+        # 从返回的数据中提取AccessKeyId和SecretAccessKey
+        access_key = auth_data['data']['uploadToken']['AccessKeyId']
+        secret_key = auth_data['data']['uploadToken']['SecretAccessKey']
+        session_token = auth_data['data']['uploadToken']['SessionToken']
+        url = (
+            "https://vod.bytedanceapi.com/"
+            f"?Action=CommitUploadInner&Version=2020-11-19&SpaceName={space_name}"
+            f"&app_id=1231&user_id={user_id}"
+        )
+
+        # 请求体内容
+        payload = {
             "SessionKey": session_key,
             "Functions": [{"name": "GetMeta"}],
-            "CallbackArgs": json.dumps({"uid": uid}),
+            "CallbackArgs": json.dumps({"uid": user_id}),
         }
-        
-        # 发送 POST 请求
-        response = requests.post(url, headers=headers, data=json.dumps(post_data))
-        if response.status_code != 200:
-            raise Exception(f"Failed to fetch video info: {response.text}")
-        
-        # 返回响应数据
-        return response.json()
+        payload_json = json.dumps(payload)
+        payload_hash =  hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+        amz_date = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        signed_headers = "x-amz-content-sha256;x-amz-date;x-amz-security-token"
+        canonical_request = (
+            f"POST\n"  # HTTPMethod
+            f"/\n"  # CanonicalURI
+            f"Action=CommitUploadInner&SpaceName={space_name}&Version=2020-11-19&app_id=1231&user_id={user_id}\n"  # CanonicalQueryString
+            f"x-amz-content-sha256:{payload_hash}\n"  # CanonicalHeaders
+            f"x-amz-date:{amz_date}\n"
+            f"x-amz-security-token:{session_token}\n\n"
+            f"{signed_headers}\n"  # SignedHeaders
+            f"{payload_hash}"  # HashedPayload
+        )
+        headers = generate_canonical_header(access_key,secret_key,session_token,payload_json)
+
+        # 提交请求
+        try:
+            response = requests.post(url, headers={**headers,"Content-Type":"text/plain;charset=UTF-8"}, data=payload_json)
+            response.raise_for_status()
+            response_data = response.json()
+
+            # 缓存数据到文件
+            cache_dir = "cache"
+            os.makedirs(cache_dir, exist_ok=True)  # 确保缓存目录存在
+            cache_path = os.path.join(cache_dir, f"commit_{user_id}.json")
+            with open(cache_path, "w", encoding="utf-8") as cache_file:
+                json.dump(response_data, cache_file, ensure_ascii=False, indent=4)
+
+            return response_data
+        except requests.exceptions.RequestException as e:
+            print(f"Error committing video: {e}")
+            raise
+    
+    def publish_video(self, vid, title, tags=None, thumb=""):
+        """
+        发布视频到平台。
+
+        参数:
+        - vid: 视频 ID（必填）
+        - title: 视频标题（必填）
+        - tags: 视频标签列表（默认空列表）
+        - thumb: 视频封面 URL 或 URI（默认空字符串）
+
+        返回:
+        - 发布结果的响应 JSON 数据
+        """
+        if tags is None:
+            tags = []
+
+        url = "https://mp.toutiao.com/xigua/api/upload/PublishVideo"
+        # API 的 _signature 参数目前未知，假设是从外部动态生成或无需修改。
+        params = {
+            "_signature": "_02B4Z6wo001014kAB5wAAIDA2.8nh7fiuMuJBAMAAIVzAKnXJBPkaA9POIbv2SNXpB0IUeaqy-M1SJu2Wn8wAT-VvHKH-cxsb-aKcQbJTSrSJVc6qznIf9.hCRDpVoO9wPuQGGe6Ik3nJBo84e"
+        }
+
+        # 示例数据，可根据需要动态生成或填充
+        data = {
+            "ItemId": "",
+            "Title": title,
+            "VideoInfo": {
+                "Vid": vid,
+                "VName": f"{title}.mp4",
+                "ThumbUri": thumb if "tos-cn" in thumb else "",
+                "ThumbUrl": thumb if "https://" in thumb else "",
+                "Duration": 0,  # 假设未定义，实际可能需要视频元数据
+                "VideoWidth": 360,
+                "VideoHeight": 480
+            },
+            "ClaimOrigin": False,
+            "Praise": False,
+            "PublishType": 1,
+            "From": "mp",
+            "EnterFrom": 5,
+            "IsNew": True,
+            "VideoType": 3,
+            "ExternalLink": "",
+            "Label": tags,
+            "CompassVideo": {
+                "CompassVideoId": "",
+                "CompassVideoName": "",
+                "CompassVideoType": 0
+            },
+            "Commodity": [],
+            "CreateSource": 2,
+            "HideInfo": {
+                "HideType": 0
+            },
+            "CoverTitles": tags[:2],  # 默认取前两个标签作为封面标题
+            "TemplateName": "",
+            "FilterName": "",
+            "AttrsValueMap": {
+                "EventTrackingRelationID": "",
+                "SubTitles": "[]"
+            },
+            "HashtagIds": [],
+            "etData": {},
+            "TerminalType": "01",
+            "OsType": "12",
+            "SoftType": "chrome 130.0.0.0",
+            "DevicePlatform": "pc"
+        }
+
+        cookies = self.load_cookies_by_username("default_user")  # 替换为实际用户名
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+            "referer": "https://mp.toutiao.com/profile_v4/xigua/upload-video",
+            "Cookie": "; ".join([f"{k}={v}" for k, v in cookies.items()])
+        }
+
+        try:
+            response = requests.post(url, params=params, headers=headers, json=data)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"Error publishing video: {e}")
+            raise
